@@ -1,0 +1,16 @@
+.apple-app {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.apple-banner-chevron {
+  font-size: 1.1em;
+  opacity: 0.8;
+}
+
+.apple-footer {
+  background: var(--color-bg-subtle);
+  padding: var(--space-6) 0;
+  margin-top: auto;
+}

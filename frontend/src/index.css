@@ -1,0 +1,111 @@
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+:root {
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  line-height: 1.47059;
+  font-weight: 400;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+
+  /* Apple-style palette */
+  --color-bg: #ffffff;
+  --color-bg-subtle: #f5f5f7;
+  --color-text: #1d1d1f;
+  --color-text-secondary: #6e6e73;
+  --color-link: #0071e3;
+  --color-link-hover: #0077ed;
+  --color-header-bg: #1d1d1f;
+  --color-header-text: #f5f5f7;
+  --color-card-dark: #000000;
+  --color-card-dark-text: #f5f5f7;
+  --color-border: rgba(0, 0, 0, 0.08);
+  --color-input-border: #d2d2d7;
+  --color-error: #bf4800;
+  --font-size-xs: 12px;
+  --font-size-sm: 14px;
+  --font-size-base: 17px;
+  --font-size-lg: 21px;
+  --font-size-xl: 28px;
+  --font-size-2xl: 40px;
+  --font-size-3xl: 48px;
+  --font-weight-regular: 400;
+  --font-weight-medium: 500;
+  --font-weight-semibold: 600;
+  --font-weight-bold: 700;
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
+  --space-8: 48px;
+  --space-10: 64px;
+  --radius: 12px;
+  --radius-sm: 8px;
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+  min-height: 100vh;
+  background-color: var(--color-bg);
+  color: var(--color-text);
+  font-size: var(--font-size-base);
+}
+
+#root {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+a {
+  color: var(--color-link);
+  text-decoration: none;
+  transition: color 0.2s ease;
+}
+
+a:hover {
+  color: var(--color-link-hover);
+  text-decoration: underline;
+}
+
+h1, h2, h3 {
+  margin: 0;
+  font-weight: var(--font-weight-semibold);
+  letter-spacing: -0.02em;
+}
+
+h1 { font-size: var(--font-size-3xl); }
+h2 { font-size: var(--font-size-2xl); }
+h3 { font-size: var(--font-size-xl); }
+
+p {
+  margin: 0 0 var(--space-4);
+}
+
+button {
+  font-family: inherit;
+  cursor: pointer;
+  border: none;
+  background: none;
+}
+
+input, textarea {
+  font-family: inherit;
+  font-size: inherit;
+}
+
+input::placeholder, textarea::placeholder {
+  color: var(--color-text-secondary);
+}

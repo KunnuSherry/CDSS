@@ -1,0 +1,15 @@
+fastapi
+uvicorn[standard]
+python-multipart
+pydantic[email]
+pydantic-settings
+python-jose[cryptography]
+passlib[bcrypt]
+motor
+pymongo
+chromadb
+sentence-transformers
+numpy
+PyMuPDF
+Pillow
+httpx
