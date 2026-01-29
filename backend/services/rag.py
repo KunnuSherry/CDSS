@@ -114,25 +114,54 @@ Return JSON:
 grok_select_and_trim = llm_select_and_trim
 
 
+def normalize_query_for_retrieval(query: str) -> str:
+    """
+    Normalize clinician-facing queries into retrieval-friendly forms.
+    Used by doctor search and CDSS guideline retrieval.
+    Examples: "high NSTEMI" -> "NSTEMI risk"; "management of NSTEMI" -> "NSTEMI management".
+    """
+    q = (query or "").strip()
+    if not q:
+        return q
+    uq = q.upper()
+    has_risk_modifier = any(w in uq for w in ("HIGH", "LOW", "SEVERE", "MILD", "RISK"))
+    lowered = q.lower()
+    for prefix in ("management of ", "treatment of "):
+        if lowered.startswith(prefix):
+            rest = q[len(prefix) :].strip()
+            if rest:
+                return f"{rest} management"
+    if "NSTEMI" in uq:
+        return "NSTEMI risk" if has_risk_modifier else "NSTEMI"
+    if "STEMI" in uq:
+        return "STEMI risk" if has_risk_modifier else "STEMI"
+    if "ACS" in uq:
+        return "ACS risk" if has_risk_modifier else "ACS"
+    return q
+
+
 """
 GROQ CLEANUP (TEXT REPAIR ONLY)
 
-Used ONLY to fix PDF-derived artifacts (broken sentences, hyphenated line
-breaks, split paragraphs). It must never summarize, interpret, or change
-clinical meaning.
+Use Grok ONLY to: fix broken words, remove hyphenation artifacts, join split sentences.
+Grok MUST NOT: summarize, simplify, add meaning, or change clinical intent.
+If Grok fails, fall back to raw text.
 """
 
-CLEANUP_SYSTEM_PROMPT = """You are repairing extracted medical guideline text.
+CLEANUP_SYSTEM_PROMPT = """You are repairing extracted medical guideline text. Output ONLY repaired text.
 
-Task:
-Clean and repair the provided text so it reads as a complete, continuous paragraph.
+Allowed repairs ONLY:
+- Fix broken words (e.g. mid-word line breaks)
+- Remove hyphenation artifacts (e.g. "anti-\\nplatelet" → "antiplatelet")
+- Join split sentences where a line break broke a sentence
 
-Rules:
-- Preserve original meaning exactly
-- Do not add or remove medical information
-- Do not summarize or interpret
-- Do not add or remove medical information
-- Fix only formatting and broken words
+You MUST NOT:
+- Summarize or simplify
+- Add meaning or interpretation
+- Change clinical intent or medical information
+- Add or remove any medical facts
+
+If nothing needs repair, return the input unchanged. Output the repaired text only, no preamble.
 """
 
 
@@ -511,6 +540,51 @@ def _is_non_guideline_page_chunk(chunk: dict[str, Any]) -> bool:
     # Obvious reference-only pages are already classified as CONTENT_REFERENCE.
     ct = _classify_content_type(chunk)
     if ct == CONTENT_REFERENCE:
+        return True
+
+    return False
+
+
+def is_non_clinical_noise(chunk: dict[str, Any], disease: str = "NSTEMI") -> bool:
+    """
+    Filter non-clinical content at backend before rendering. Rule-based; no AI.
+    Never display: TOC, page index, section headers without narrative,
+    STEMI system-of-care when disease=NSTEMI, EMS/pandemic logistics, journal metadata.
+    Safety: Reduces clinician overload and irrelevant content.
+    """
+    combined = _combined_text(chunk).upper()
+    text = (chunk.get("text") or "").strip()
+
+    # Table of contents / page index (never display in patient advisory)
+    if "TABLE OF CONTENTS" in combined:
+        return True
+    if "CONTENTS" in combined and ("PAGE" in combined or re.search(r"\d+\s+\.+\s+\d+", combined)):
+        return True
+    if re.search(r"^\s*\d+\s*\.\s*\.\s*\.\s*\d+\s*$", text.strip()) or re.match(r"^(PAGE|P\.)\s*\d+", text.strip(), re.I):
+        return True
+
+    # Section header only (very short, no narrative): e.g. "3.2.1 Diagnostic criteria" with nothing else
+    if len(text) < 100 and re.match(r"^[\d\.\s]+[A-Z]", text.strip()) and not re.search(r"[a-z]{4,}", text):
+        return True
+
+    # STEMI system-of-care when disease is NSTEMI (do not show STEMI-specific workflow)
+    if (disease or "").upper() == "NSTEMI":
+        if "STEMI" in combined and ("SYSTEM OF CARE" in combined or "SYSTEM-OF-CARE" in combined or "EMS" in combined and "TRANSFER" in combined):
+            return True
+        if "ST-ELEVATION" in combined and "NSTEMI" not in combined and ("PATHWAY" in combined or "ALGORITHM" in combined):
+            return True
+
+    # EMS workflow / pandemic logistics (non-clinical logistics)
+    if "EMS" in combined and ("PROTOCOL" in combined or "DISPATCH" in combined or "PREHOSPITAL" in combined):
+        if "NSTEMI" not in combined and "MANAGEMENT" not in combined:
+            return True
+    if "PANDEMIC" in combined or "COVID" in combined or "LOGISTICS" in combined:
+        return True
+
+    # Journal metadata (DOI, issue, author lists)
+    if re.search(r"\b10\.\d{4,}/", combined) or "VOLUME" in combined and "ISSUE" in combined and len(text) < 200:
+        return True
+    if "AUTHOR" in combined and "AFFILIATION" in combined and len(text) < 300:
         return True
 
     return False

@@ -26,7 +26,14 @@ async function request(path, { method = 'GET', body, auth = true } = {}) {
     let msg = `Request failed (${res.status})`
     try {
       const data = await res.json()
-      msg = data?.detail ?? msg
+      const d = data?.detail
+      if (Array.isArray(d) && d.length) {
+        msg = d.map((e) => e.msg || e.message || JSON.stringify(e)).join('; ')
+      } else if (d && typeof d === 'string') {
+        msg = d
+      } else if (d) {
+        msg = typeof d === 'object' ? JSON.stringify(d) : String(d)
+      }
     } catch {
       // ignore
     }
@@ -179,5 +186,7 @@ export const api = {
     return await res.json()
   },
   doctorSearch: (query) => request(`/api/doctor/search?query=${encodeURIComponent(query)}`),
+  /** POST patient clinical input; returns CDSS advisory (GRACE, guidelines, case studies). */
+  doctorCdss: (body) => request('/api/doctor/cdss', { method: 'POST', body }),
 }
 

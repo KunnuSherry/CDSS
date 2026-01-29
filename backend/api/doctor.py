@@ -9,6 +9,7 @@ from services.rag import (
     build_coverage_note,
     groq_cleanup_chunks,
     build_sectioned_display,
+    normalize_query_for_retrieval,
 )
 
 
@@ -18,48 +19,6 @@ def _sort_key(c: dict) -> tuple[int, float]:
 
 
 router = APIRouter()
-
-
-def _normalize_query_for_retrieval(query: str) -> str:
-    """
-    Normalize clinician-facing queries into retrieval-friendly forms.
-
-    Examples:
-    - "high NSTEMI" -> "NSTEMI risk"
-    - "severe ACS" -> "ACS risk"
-    - "management of NSTEMI" -> "NSTEMI management"
-
-    This is semantic, not literal: we avoid overfitting to exact phrases in the PDF.
-    """
-    q = (query or "").strip()
-    if not q:
-        return q
-
-    uq = q.upper()
-    has_risk_modifier = any(w in uq for w in ("HIGH", "LOW", "SEVERE", "MILD", "RISK"))
-
-    # Normalize "management of X" / "treatment of X" -> "X management"
-    lowered = q.lower()
-    for prefix in ("management of ", "treatment of "):
-        if lowered.startswith(prefix):
-            rest = q[len(prefix) :].strip()
-            if rest:
-                return f"{rest} management"
-
-    if "NSTEMI" in uq:
-        if has_risk_modifier:
-            return "NSTEMI risk"
-        return "NSTEMI"
-    if "STEMI" in uq:
-        if has_risk_modifier:
-            return "STEMI risk"
-        return "STEMI"
-    if "ACS" in uq:
-        if has_risk_modifier:
-            return "ACS risk"
-        return "ACS"
-
-    return q
 
 
 @router.get("/search", response_model=SearchResponse)
@@ -72,7 +31,7 @@ async def search(query: str, _user=Depends(require_roles("admin", "doctor"))):
 
     # Normalize clinician phrasing into retrieval-friendly semantics without
     # requiring exact phrases from the PDF.
-    normalized_query = _normalize_query_for_retrieval(query)
+    normalized_query = normalize_query_for_retrieval(query)
 
     documents = []
     async for d in db["documents"].find({}):

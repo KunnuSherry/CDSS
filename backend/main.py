@@ -8,6 +8,7 @@ from models.db import connect_to_mongo, close_mongo_connection
 from api.auth import router as auth_router
 from api.admin import router as admin_router
 from api.doctor import router as doctor_router
+from api.cdss import router as cdss_router
 from settings import settings
 
 
@@ -42,6 +43,7 @@ async def _shutdown() -> None:
 app.include_router(auth_router, prefix="/api/auth", tags=["auth"])
 app.include_router(admin_router, prefix="/api/admin", tags=["admin"])
 app.include_router(doctor_router, prefix="/api/doctor", tags=["doctor"])
+app.include_router(cdss_router, prefix="/api/doctor", tags=["cdss"])
 
 # Serves extracted images at /uploads/...
 os.makedirs(settings.upload_dir, exist_ok=True)
