@@ -16,6 +16,9 @@ from models.clinical import (
     GraceScoreResult,
     PatientClinicalInput,
 )
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -155,9 +158,44 @@ def compute_grace_score(patient: PatientClinicalInput) -> GraceScoreResult:
 
     Safety: Before returning, validate engine against 5 test patients; if deviation >3, raise and block downstream.
     """
+    # Validate internal engine consistency against deterministic test vectors.
     _validate_grace_engine()
 
-    total = _compute_grace_total_only(patient)
+    # Compute per-variable points (for debug logging if needed)
+    age_pts = _lookup_bracket(patient.age, _GRACE_AGE)
+    hr_pts = _lookup_bracket(patient.heart_rate, _GRACE_HR)
+    sbp_pts = _lookup_bracket(patient.systolic_bp, _GRACE_SBP)
+    cr_pts = _lookup_bracket(patient.serum_creatinine, _GRACE_CREATININE)
+    killip_pts = _GRACE_KILLIP.get(patient.killip_class, 0)
+    arrest_pts = _GRACE_CARDIAC_ARREST_POINTS if patient.cardiac_arrest_at_admission else 0
+    st_pts = _GRACE_ST_DEVIATION_POINTS if patient.st_deviation_ecg else 0
+    enzyme_pts = _GRACE_ELEVATED_ENZYMES_POINTS if patient.elevated_cardiac_enzymes else 0
+
+    total = (
+        age_pts
+        + hr_pts
+        + sbp_pts
+        + cr_pts
+        + killip_pts
+        + arrest_pts
+        + st_pts
+        + enzyme_pts
+    )
+
+    # Always log a per-variable breakdown at DEBUG level; an optional debug mode
+    # in higher-level callers can surface these logs for troubleshooting.
+    logger.debug(
+        "GRACE breakdown: age=%s hr=%s sbp=%s cr=%s killip=%s arrest=%s st=%s enzyme=%s total=%s",
+        age_pts,
+        hr_pts,
+        sbp_pts,
+        cr_pts,
+        killip_pts,
+        arrest_pts,
+        st_pts,
+        enzyme_pts,
+        total,
+    )
 
     if total <= GRACE_RISK_LOW_MAX:
         risk_category = "low"

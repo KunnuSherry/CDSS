@@ -567,6 +567,27 @@ def is_non_clinical_noise(chunk: dict[str, Any], disease: str = "NSTEMI") -> boo
     if len(text) < 100 and re.match(r"^[\d\.\s]+[A-Z]", text.strip()) and not re.search(r"[a-z]{4,}", text):
         return True
 
+    # Aggressively suppress early pages that look like Table of Contents or cover/front-matter.
+    # Many PDFs put TOC and index on pages 1-2; these are rarely clinically useful.
+    try:
+        page_num = int(chunk.get("page", 0) or 0)
+    except Exception:
+        page_num = 0
+
+    heading = (chunk.get("heading") or "").upper()
+    if page_num in (1, 2):
+        # If heading explicitly says contents/table of contents, drop.
+        if "CONTENTS" in heading or "TABLE OF CONTENTS" in heading or "INDEX" in heading:
+            return True
+        # If the body is short and contains many short lines or dot-leaders, treat as TOC.
+        lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+        if lines and len(text.strip()) < 500:
+            leader_count = sum(1 for ln in lines if re.search(r"\.{2,}\s*\d+$", ln) or re.search(r"\.{2,}", ln))
+            short_lines = sum(1 for ln in lines if len(ln) < 80)
+            enum_like = sum(1 for ln in lines if re.match(r"^\d+\.?\s+\w+", ln))
+            if leader_count >= 1 or short_lines >= max(3, int(0.6 * len(lines))) or enum_like >= 3:
+                return True
+
     # STEMI system-of-care when disease is NSTEMI (do not show STEMI-specific workflow)
     if (disease or "").upper() == "NSTEMI":
         if "STEMI" in combined and ("SYSTEM OF CARE" in combined or "SYSTEM-OF-CARE" in combined or "EMS" in combined and "TRANSFER" in combined):
@@ -586,6 +607,64 @@ def is_non_clinical_noise(chunk: dict[str, Any], disease: str = "NSTEMI") -> boo
         return True
     if "AUTHOR" in combined and "AFFILIATION" in combined and len(text) < 300:
         return True
+
+    # Dot-leaders or table-of-contents style leaders like "Section .... 12" are noise
+    if re.search(r"\.\s*\.\s*\.\s*\.", combined):
+        return True
+
+    # More robust Table-of-Contents detection: multiple lines with dot-leaders
+    def _looks_like_toc(text: str) -> bool:
+        if not text or not text.strip():
+            return False
+        lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+        if len(lines) < 3:
+            return False
+
+        leader_lines = 0
+        page_ending_lines = 0
+        for ln in lines:
+            # common TOC pattern: title ... 12  or title ...... 12
+            if re.search(r"\.\.{2,}\s*\d+$", ln) or re.search(r"\.{2,}\s*\d+$", ln):
+                leader_lines += 1
+            # lines that end with a small page number
+            if re.search(r"\b\d{1,3}$", ln) and len(ln) < 120 and re.search(r"\.{2,}|\s{2,}", ln):
+                page_ending_lines += 1
+
+        # If several lines match TOC-like patterns, treat as TOC
+        if leader_lines >= 2 or page_ending_lines >= 3:
+            return True
+
+        # If a high fraction of lines are short (<80 chars) and many contain dot-leaders,
+        # it's likely a TOC or index page.
+        if len(lines) >= 4:
+            short_lines = sum(1 for ln in lines if len(ln) < 80)
+            dot_lines = sum(1 for ln in lines if 
+                            re.search(r"\.{2,}|\.{2,}\s*\d+$", ln) or re.search(r"\.{2,}\s*\d+", ln))
+            if short_lines / len(lines) >= 0.6 and dot_lines / len(lines) >= 0.2:
+                return True
+
+        # Also detect many short enumerated title lines (e.g., '1. Introduction', '2. Methods')
+        enum_like = 0
+        for ln in lines[:20]:
+            if re.match(r"^\d+\.?\s+\w+", ln) and len(ln) < 80 and re.search(r"\b\d+\b$", ln) is None:
+                enum_like += 1
+        if enum_like >= 4:
+            return True
+
+        return False
+
+    if _looks_like_toc(text):
+        return True
+
+    # Detect explicit page markers; often TOC or header/footer content like 'Page 2 of 20', 'p. 2'
+    if re.search(r"\bpage\s*\d{1,3}\b", combined, re.I) or re.search(r"\bp\.\s*\d{1,3}\b", combined, re.I):
+        # If the chunk is very short or on an early page, treat as non-clinical
+        try:
+            pnum = int(chunk.get("page", 0) or 0)
+        except Exception:
+            pnum = 0
+        if pnum <= 3 or len(text.strip()) < 400:
+            return True
 
     return False
 
@@ -798,6 +877,60 @@ def _compute_confidence_for_chunk(
         + 0.10 * position
     )
     return max(0.0, min(1.0, score))
+
+
+def compute_final_chunk_scores(chunks: list[dict[str, Any]], query: str) -> list[dict[str, Any]]:
+    """
+    Compute final_score for each retrieval chunk using the required formula:
+
+    final_score = (vector_similarity * 0.6)
+                + (section_priority * 0.3)
+                + (risk_match_bonus * 0.1)
+
+    - vector_similarity: converted from 'distance' via _distance_to_similarity
+    - section_priority: Diagnostic > Risk > Management > Harm (mapped to numeric)
+    - risk_match_bonus: +0.1 when chunk explicitly references 'GRACE' and '140' or 'HIGH RISK'
+
+    Returns list of chunks with added keys: final_score, similarity, section_key, section_title,
+    section_priority, risk_match_bonus.
+    """
+    out: list[dict[str, Any]] = []
+
+    SECTION_PRIORITY_MAP: dict[str, float] = {
+        SECTION_DIAGNOSTIC: 1.0,
+        SECTION_RISK: 0.9,
+        SECTION_MANAGEMENT: 0.7,
+        SECTION_HARM: 0.5,
+        SECTION_DEFINITION_SCOPE: 0.4,
+    }
+
+    uq = (query or "").upper()
+
+    for c in chunks:
+        sim = _distance_to_similarity(c.get("distance"))
+        sec = _assign_section_for_display(c, query)
+        sec_pri = SECTION_PRIORITY_MAP.get(sec, 0.4)
+        text = _combined_text(c).upper()
+
+        # Simple risk-match detection: mentions GRACE+140 or high-risk language
+        risk_bonus = 0.0
+        if ("GRACE" in text and "140" in text) or "HIGH RISK" in text or "HIGH-RISK" in text or ("GRACE" in text and ">" in text and "140" in text):
+            risk_bonus = 0.1
+
+        final = 0.6 * sim + 0.3 * sec_pri + 0.1 * risk_bonus
+
+        out.append({
+            **c,
+            "final_score": float(max(0.0, min(1.0, final))),
+            "similarity": float(sim),
+            "section_key": sec,
+            "section_title": _SECTION_CONFIG.get(sec, {}).get("title"),
+            "section_priority": float(sec_pri),
+            "risk_match_bonus": float(risk_bonus),
+        })
+
+    out.sort(key=lambda r: r.get("final_score", 0.0), reverse=True)
+    return out
 
 
 def build_sectioned_display(

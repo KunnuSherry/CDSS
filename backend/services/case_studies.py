@@ -94,7 +94,7 @@ def _esummary_details(pmids: list[str]) -> list[dict]:
 def get_case_studies_for_profile(
     risk_level: str,
     intervention_type: str | None = None,
-    max_results: int = 4,
+    max_results: int = 3,
     grace_total: int | None = None,
 ) -> list[CaseStudyRef]:
     """

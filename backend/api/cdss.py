@@ -21,11 +21,11 @@ from services.case_studies import get_case_studies_for_profile
 from services.grace import GraceValidationError, compute_grace_score
 from services.guideline_mapping import get_guideline_queries_for_grace
 from services.rag import (
-    build_sectioned_display,
     groq_cleanup_chunks,
     is_non_clinical_noise,
     normalize_query_for_retrieval,
     retrieve_chunks,
+    compute_final_chunk_scores,
 )
 from services.rag import (
     SECTION_DIAGNOSTIC,
@@ -36,6 +36,9 @@ from services.rag import (
 
 router = APIRouter()
 
+import httpx
+from settings import settings
+
 # Hard display limits: at most 5 guideline blocks visible. Rest behind "Show supporting evidence (advanced)".
 # Diagnostic 1, Risk stratification 1, Management 2, Harm 1.
 MAX_PRIMARY_BY_SECTION: dict[str, int] = {
@@ -45,7 +48,7 @@ MAX_PRIMARY_BY_SECTION: dict[str, int] = {
     SECTION_HARM: 1,
 }
 MAX_PRIMARY_TOTAL = 5
-MAX_CASE_STUDIES = 4
+MAX_CASE_STUDIES = 3
 
 # Exact disclaimer (non-negotiable).
 DISCLAIMER_TEXT = (
@@ -83,60 +86,66 @@ async def _retrieve_guideline_excerpts_for_queries(
         documents.append(d)
 
     seen_chunk_ids: set[str] = set()
-    all_selected_raw: list[dict] = []
+    all_candidates: list[dict] = []
 
+    # Collect candidates from all documents for all queries
     for query in queries:
         normalized = normalize_query_for_retrieval(query)
-        all_candidates = []
         for d in documents:
             candidates = retrieve_chunks(
                 normalized,
                 collection_name=f"pdf_{d['_id']}",
                 n_results=32,
             )
-            all_candidates.extend(candidates)
+            for c in candidates:
+                # attach originating query to candidate so scoring may use it
+                c["_retrieval_query"] = normalized
+                all_candidates.append(c)
 
-        section_groups_meta, selected_chunks_raw = build_sectioned_display(
-            query=normalized,
-            chunks=all_candidates,
-        )
+    # Filter non-clinical noise early
+    filtered = []
+    for c in all_candidates:
+        cid = c.get("chunk_id") or ""
+        if not cid or cid in seen_chunk_ids:
+            continue
+        if is_non_clinical_noise(c, disease="NSTEMI"):
+            continue
+        seen_chunk_ids.add(cid)
+        filtered.append(c)
 
-        for g in section_groups_meta:
-            skey = g.get("section_key", "")
-            stitle = g.get("section_title", "")
-            for item in g.get("items", []):
-                cid = item.get("chunk_id") or ""
-                if not cid or cid in seen_chunk_ids:
-                    continue
-                # PART 4: Filter non-clinical noise at backend (TOC, STEMI system-of-care, etc.).
-                if is_non_clinical_noise(item, disease="NSTEMI"):
-                    continue
-                seen_chunk_ids.add(cid)
-                item["_section_key"] = skey
-                item["_section_title"] = stitle
-                all_selected_raw.append(item)
-
-    if not all_selected_raw:
+    if not filtered:
         return [], []
 
-    cleaned_map = await groq_cleanup_chunks(all_selected_raw)
+    # Rank each chunk independently using the final_score formula
+    scored = compute_final_chunk_scores(filtered, query=queries[0] if queries else "")
 
-    # Enforce hard display limits: diagnostic 1, risk 1, management 2, harm 1.
+    # Now enforce hard display limits by section using scores (select top-N per section,
+    # but overall cap of MAX_PRIMARY_TOTAL)
     section_counts: dict[str, int] = {k: 0 for k in MAX_PRIMARY_BY_SECTION}
     primary_raw: list[dict] = []
     supporting_raw: list[dict] = []
 
-    for raw in all_selected_raw:
-        skey = raw.get("_section_key") or ""
+    for item in scored:
+        skey = item.get("section_key") or ""
+        # only accept primary if section cap not reached
         if skey in MAX_PRIMARY_BY_SECTION:
             cap = MAX_PRIMARY_BY_SECTION[skey]
             if section_counts[skey] < cap and len(primary_raw) < MAX_PRIMARY_TOTAL:
-                primary_raw.append(raw)
+                primary_raw.append(item)
                 section_counts[skey] += 1
             else:
-                supporting_raw.append(raw)
+                supporting_raw.append(item)
         else:
-            supporting_raw.append(raw)
+            supporting_raw.append(item)
+
+    # normalize section keys to previous underscore style for _to_excerpt
+    for r in primary_raw + supporting_raw:
+        if "section_key" in r:
+            r["_section_key"] = r.get("section_key")
+        if "section_title" in r:
+            r["_section_title"] = r.get("section_title")
+
+    cleaned_map = await groq_cleanup_chunks(primary_raw + supporting_raw)
 
     primary = [_to_excerpt(r, cleaned_map) for r in primary_raw]
     supporting = [_to_excerpt(r, cleaned_map) for r in supporting_raw]
@@ -190,3 +199,73 @@ async def patient_decision_support(
         case_studies=case_studies,
         disclaimer=DISCLAIMER_TEXT,
     )
+
+
+@router.post("/cdss/explain_chunk")
+async def explain_chunk(
+    chunk: GuidelineExcerpt,
+    _user=Depends(require_roles("admin", "doctor")),
+) -> dict:
+    """
+    Controlled AI explanation endpoint.
+
+    - Runs ONLY on explicit user click and accepts a single chunk.
+    - Returns up to 5 bullet points in plain clinical language.
+    - MUST NOT contain treatment recommendations or prescriptive language.
+    - If API fails or output contains recommendation language, return unavailable.
+    """
+    if not settings.groq_api_key:
+        return {"error": "AI explanation unavailable"}
+
+    text = (chunk.text or "").strip()
+    if not text:
+        return {"error": "No chunk text provided"}
+
+    system = (
+        "You are an objective clinical assistant. Produce up to 5 concise bullet points "
+        "that restate only the factual content of the INPUT TEXT in plain clinical language. "
+        "Do NOT provide recommendations, suggestions, or guidance (do not use words like 'should', 'recommend', 'consider', 'must'). "
+        "Do not add any information not present in the input. Output JSON: {\"bullets\": [..]}"
+    )
+
+    user_prompt = f"INPUT:\n""\"\n{text}\n\"\"\n"
+
+    try:
+        async with httpx.AsyncClient(base_url=settings.groq_base_url, timeout=20) as client:
+            resp = await client.post(
+                "/chat/completions",
+                headers={"Authorization": f"Bearer {settings.groq_api_key}"},
+                json={
+                    "model": settings.groq_model,
+                    "messages": [
+                        {"role": "system", "content": system},
+                        {"role": "user", "content": user_prompt},
+                    ],
+                    "temperature": 0,
+                },
+            )
+            resp.raise_for_status()
+            data = resp.json()
+    except Exception:
+        return {"error": "AI explanation unavailable"}
+
+    content = (data.get("choices") or [{}])[0].get("message", {}).get("content", "")
+    try:
+        # Expect JSON from model
+        parsed = content and __import__("json").loads(content)
+    except Exception:
+        return {"error": "AI explanation unavailable"}
+
+    bullets = parsed.get("bullets") if isinstance(parsed, dict) else None
+    if not bullets or not isinstance(bullets, list):
+        return {"error": "AI explanation unavailable"}
+
+    # Post-validate: ensure no recommendation words
+    forbidden = ("should", "recommend", "consider", "must", "ought")
+    for b in bullets:
+        lb = (b or "").lower()
+        if any(f in lb for f in forbidden):
+            return {"error": "AI explanation unavailable"}
+
+    # Truncate to max 5 bullets and return
+    return {"bullets": [str(b).strip() for b in bullets][:5]}

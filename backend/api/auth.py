@@ -3,7 +3,7 @@ from datetime import datetime, timedelta, timezone
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.security import OAuth2PasswordBearer
 from jose import jwt, JWTError
-from passlib.context import CryptContext
+import bcrypt
 
 from models.db import get_db
 from models.user import LoginRequest, TokenResponse, UserCreate, UserPublic
@@ -11,8 +11,20 @@ from settings import settings
 
 
 router = APIRouter()
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/login")
+
+
+def hash_password(password: str) -> str:
+    """Hash a password using bcrypt."""
+    return bcrypt.hashpw(password[:72].encode(), bcrypt.gensalt()).decode()
+
+
+def verify_password(password: str, hash_value: str) -> bool:
+    """Verify a password against a bcrypt hash."""
+    try:
+        return bcrypt.checkpw(password[:72].encode(), hash_value.encode())
+    except Exception:
+        return False
 
 
 def _create_token(user_id: str, role: str) -> str:
@@ -68,7 +80,8 @@ async def signup(body: UserCreate):
         raise HTTPException(status_code=400, detail="Email already registered")
 
     user_id = f"user_{int(datetime.now(timezone.utc).timestamp() * 1000)}"
-    hashed = pwd_context.hash(body.password)
+    # Hash password using bcrypt
+    hashed = hash_password(body.password)
     doc = {"_id": user_id, "email": body.email, "password_hash": hashed, "role": body.role}
     await db["users"].insert_one(doc)
     return UserPublic(id=user_id, email=body.email, role=body.role)
@@ -78,8 +91,15 @@ async def signup(body: UserCreate):
 async def login(body: LoginRequest):
     db = get_db()
     user = await db["users"].find_one({"email": body.email})
-    if not user or not pwd_context.verify(body.password, user.get("password_hash", "")):
+    if not user:
         raise HTTPException(status_code=401, detail="Invalid credentials")
+    
+    password_hash = user.get("password_hash", "")
+    is_valid = verify_password(body.password, password_hash)
+    
+    if not is_valid:
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+    
     token = _create_token(user["_id"], user["role"])
     return TokenResponse(access_token=token)
 
